@@ -25,6 +25,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from user_optimized_transformer import UserOptimizedTransformer
 
 @dataclass(frozen=True)
 class TransformerConfig:
@@ -172,32 +173,32 @@ class BaselineTransformer(nn.Module):
         return x
 
 
-class UserOptimizedTransformer(BaselineTransformer):
-    """
-    Replace this class with the optimized implementation.
+# class UserOptimizedTransformer(BaselineTransformer):
+#     """
+#     Replace this class with the optimized implementation.
 
-    Requirements:
-      1. Keep the forward signature unchanged.
-      2. Return a tensor with shape [batch_size, seq_len, d_model].
-      3. Keep compatible parameter names, or customize copy_model_weights().
-    """
+#     Requirements:
+#       1. Keep the forward signature unchanged.
+#       2. Return a tensor with shape [batch_size, seq_len, d_model].
+#       3. Keep compatible parameter names, or customize copy_model_weights().
+#     """
 
-    def forward(
-        self,
-        x: torch.Tensor,
-        valid_token_mask: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        # ====================== your codes here ======================
-        # Example optimization directions:
-        #   * torch.nn.functional.scaled_dot_product_attention
-        #   * torch.compile
-        #   * Triton/CUDA fused kernels
-        #   * fused LayerNorm / residual / FFN
-        #
-        # The default implementation calls the baseline so that this script
-        # remains directly runnable before the optimized code is inserted.
-        return super().forward(x, valid_token_mask)
-        # ============================================================
+#     def forward(
+#         self,
+#         x: torch.Tensor,
+#         valid_token_mask: Optional[torch.Tensor] = None,
+#     ) -> torch.Tensor:
+#         # ====================== your codes here ======================
+#         # Example optimization directions:
+#         #   * torch.nn.functional.scaled_dot_product_attention
+#         #   * torch.compile
+#         #   * Triton/CUDA fused kernels
+#         #   * fused LayerNorm / residual / FFN
+#         #
+#         # The default implementation calls the baseline so that this script
+#         # remains directly runnable before the optimized code is inserted.
+#         return super().forward(x, valid_token_mask)
+#         # ============================================================
 
 
 def copy_model_weights(
