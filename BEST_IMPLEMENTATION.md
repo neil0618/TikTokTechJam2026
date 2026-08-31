@@ -7,7 +7,8 @@ and correctness checks; unsupported shapes use the safe PyTorch fallback.
 ## Verification checkpoint
 
 - Verification date: 2026-09-01
-- Base checkpoint: `5db371c`
+- Retained implementation checkpoint: `31d194d`
+- Pre-session checkpoint: `5db371c`
 - Strict FP32 reference SHA256:
   `E1925A209BBC2A536B0DE96870585D8422018107D0696D4EA1D196BC9A4BEE4A`
 - Full-suite results: `benchmark_logs/43_final_optimized_suite/results.csv`
