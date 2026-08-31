@@ -1,0 +1,29 @@
+[W831 16:11:00.000000000 CUDACachingAllocator.cpp:3933] memory allocation failed with OOM on device 0 while trying to allocate 13107200000 bytes (free: 0, total: 8518041600).
+[W831 16:11:03.000000000 CUDACachingAllocator.cpp:3933] memory allocation failed with OOM on device 0 while trying to allocate 13107200000 bytes (free: 0, total: 8518041600).
+=== Strict-FP32 baseline vs mixed candidate ===
+TransformerConfig(batch_size=32, seq_len=100000, d_model=1024, num_heads=16, ffn_dim=1024, num_layers=2, causal=True)
+device=cuda, baseline_dtype=torch.float32, baseline_tf32=False
+mixed_policy=FP16 projections; FP32 accumulation/reductions/GELU/residual/LayerNorm/output
+case8_custom_triton_projections=False
+d128_custom_triton_projections=False
+d128_custom_triton_attention=False
+compile_baseline=False, compile_mixed=True, compile_mode=reduce-overhead
+microbatch_size=disabled
+gpu=NVIDIA GeForce RTX 5060 Laptop GPU
+
+=== Accuracy check ===
+criterion: abs_error <= 0.002 OR relative_error <= 2.00%
+Traceback (most recent call last):
+  File "C:\Users\gauth\OneDrive\Desktop\TikTokTechJam2026\mixed_precision_benchmark.py", line 157, in <module>
+    raise SystemExit(main())
+                     ^^^^^^
+  File "C:\Users\gauth\OneDrive\Desktop\TikTokTechJam2026\mixed_precision_benchmark.py", line 124, in main
+    passed = bench.run_accuracy_tests(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\gauth\OneDrive\Desktop\TikTokTechJam2026\torch_transformer_benchmark.py", line 597, in run_accuracy_tests
+    x, valid_mask = generate_random_case(
+                    ^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\gauth\OneDrive\Desktop\TikTokTechJam2026\torch_transformer_benchmark.py", line 467, in generate_random_case
+    x = x * input_scale
+        ~~^~~~~~~~~~~~~
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 12.21 GiB. GPU 0 has a total capacity of 7.93 GiB of which 0 bytes is free. Of the allocated memory 12.28 GiB is allocated by PyTorch, and 29.85 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://docs.pytorch.org/docs/stable/notes/cuda.html#optimizing-memory-usage-with-pytorch-cuda-alloc-conf)

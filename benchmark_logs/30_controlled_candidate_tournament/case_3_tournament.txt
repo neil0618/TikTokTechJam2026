@@ -1,0 +1,26 @@
+C:\Users\gauth\OneDrive\Desktop\TikTokTechJam2026\.venv\Lib\site-packages\torch\_inductor\compile_fx.py:321: UserWarning: TensorFloat32 tensor cores for float32 matrix multiplication available but not enabled. Consider setting `torch.set_float32_matmul_precision('high')` for better performance.
+  warnings.warn(
+W0901 00:10:22.568000 7896 .venv\Lib\site-packages\torch\_inductor\utils.py:1953] [1/0] Not enough SMs to use max_autotune_gemm mode
+case=3 config=TransformerConfig(batch_size=4, seq_len=128, d_model=128, num_heads=4, ffn_dim=128, num_layers=4, causal=True)
+gpu=NVIDIA GeForce RTX 5060 Laptop GPU
+protocol=accuracy:3, warmup:10, repeats:30, rounds:5
+incumbent=mixed_vendor challenger=fp32_custom_attention
+accuracy trial=1 route=mixed_vendor status=PASS max_abs=0.00170898 failed=0/65536
+accuracy trial=1 route=fp32_custom_attention status=PASS max_abs=0.00072968 failed=0/65536
+accuracy trial=2 route=mixed_vendor status=PASS max_abs=0.00169219 failed=0/65536
+accuracy trial=2 route=fp32_custom_attention status=PASS max_abs=0.00090712 failed=0/65536
+accuracy trial=3 route=mixed_vendor status=PASS max_abs=0.00167096 failed=0/65536
+accuracy trial=3 route=fp32_custom_attention status=PASS max_abs=0.00085083 failed=0/65536
+round=1 route=mixed_vendor median_ms=0.151792
+round=1 route=fp32_custom_attention median_ms=0.279728
+round=2 route=fp32_custom_attention median_ms=0.276656
+round=2 route=mixed_vendor median_ms=0.152416
+round=3 route=mixed_vendor median_ms=0.152224
+round=3 route=fp32_custom_attention median_ms=0.283280
+round=4 route=fp32_custom_attention median_ms=0.282288
+round=4 route=mixed_vendor median_ms=0.152320
+round=5 route=mixed_vendor median_ms=0.152080
+round=5 route=fp32_custom_attention median_ms=0.285568
+result route=mixed_vendor median_ms=0.152096 mean_ms=0.160243 min_ms=0.148928
+result route=fp32_custom_attention median_ms=0.280896 mean_ms=0.300567 min_ms=0.249440
+challenger_speedup=0.541467x

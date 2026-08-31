@@ -1,0 +1,20 @@
+W0831 13:31:19.571000 13964 .venv\Lib\site-packages\torch\_inductor\utils.py:1953] [0/0] Not enough SMs to use max_autotune_gemm mode
+=== Custom-kernel configuration ===
+TransformerConfig(batch_size=4, seq_len=128, d_model=128, num_heads=4, ffn_dim=128, num_layers=4, causal=True)
+device=cuda, dtype=torch.float32, torch=2.13.0+cu130
+compile_baseline=False, compile_custom=True, compile_mode=reduce-overhead
+microbatch_size=disabled
+custom_attention_active=True
+gpu=NVIDIA GeForce RTX 5060 Laptop GPU
+
+=== Accuracy check ===
+criterion: abs_error <= 0.002 OR relative_error <= 2.00%
+trial 01/1: PASS | max_abs=0.00125545 | max_rel=51.987 | failed=0/65536
+summary: PASS | max_abs=0.00125545 | max_rel=51.987 | failed=0/65536
+
+=== Performance benchmark ===
+timing excludes random-data generation and uses a fixed input
+CUDA latency is measured with torch.cuda.Event on the current stream
+baseline : median=4.1041 ms | mean=4.8731 ms | p90=6.2163 ms | min=1.4916 ms | throughput=124751.96 token/s
+optimized: median=0.3887 ms | mean=0.4282 ms | p90=0.6078 ms | min=0.2578 ms | throughput=1317251.89 token/s
+speedup  : 10.559x based on median latency
