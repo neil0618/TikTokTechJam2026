@@ -1,0 +1,19 @@
+accuracy trial=1 route=incumbent status=PASS max_abs=0.00120437 failed=0/1048576
+accuracy trial=1 route=fp16_normalized_stream status=PASS max_abs=0.00120437 failed=0/1048576
+accuracy trial=2 route=incumbent status=PASS max_abs=0.00137335 failed=0/1048576
+accuracy trial=2 route=fp16_normalized_stream status=PASS max_abs=0.00137335 failed=0/1048576
+accuracy trial=3 route=incumbent status=PASS max_abs=0.00116050 failed=0/1048576
+accuracy trial=3 route=fp16_normalized_stream status=PASS max_abs=0.00114560 failed=0/1048576
+round=1 route=incumbent median_ms=0.469104
+round=1 route=fp16_normalized_stream median_ms=0.518544
+round=2 route=fp16_normalized_stream median_ms=0.512448
+round=2 route=incumbent median_ms=0.555280
+round=3 route=incumbent median_ms=0.559424
+round=3 route=fp16_normalized_stream median_ms=0.510800
+round=4 route=fp16_normalized_stream median_ms=0.508144
+round=4 route=incumbent median_ms=0.555296
+round=5 route=incumbent median_ms=0.563600
+round=5 route=fp16_normalized_stream median_ms=0.510000
+result route=incumbent median_ms=0.556768 mean_ms=0.663075 min_ms=0.453152
+result route=fp16_normalized_stream median_ms=0.510288 mean_ms=0.621962 min_ms=0.483392
+speedup=1.091086x

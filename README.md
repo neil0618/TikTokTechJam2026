@@ -15,7 +15,7 @@ a speedup.
 - Cases 1–13 pass the benchmark correctness rule with zero failed elements.
 - Case 14 cannot allocate its input on the test GPU and OOMs before either model
   executes.
-- The latest official run produced speedups from **3.725x to 18.142x**.
+- The latest official run produced speedups from **4.256x to 29.333x**.
 - The strict reference remains IEEE FP32 with TF32 disabled in the mixed
   benchmark.
 
@@ -24,19 +24,19 @@ with PyTorch 2.13.0+cu130, CUDA 13.0, and Triton 3.7.1.
 
 | Case | Latest candidate | Speedup | Correctness |
 |---:|---:|---:|:---:|
-| 1 | 0.6187 ms | 5.584x | PASS |
-| 2 | 0.1192 ms | 16.243x | PASS |
-| 3 | 0.1523 ms | 13.613x | PASS |
-| 4 | 0.1881 ms | 8.599x | PASS |
-| 5 | 1.3764 ms | 8.511x | PASS |
-| 6 | 144.2230 ms | 5.833x | PASS |
-| 7 | 0.3933 ms | 6.246x | PASS |
-| 8 | 23.2569 ms | 3.725x | PASS |
-| 9 | 0.5848 ms | 4.204x | PASS |
-| 10 | 0.7027 ms | 3.970x | PASS |
-| 11 | 1.4400 ms | 10.127x | PASS |
-| 12 | 0.1924 ms | 9.130x | PASS |
-| 13 | 11.8053 ms | 18.142x | PASS |
+| 1 | 0.6424 ms | 7.184x | PASS |
+| 2 | 0.1252 ms | 19.515x | PASS |
+| 3 | 0.1285 ms | 18.476x | PASS |
+| 4 | 0.1692 ms | 11.454x | PASS |
+| 5 | 1.1638 ms | 10.764x | PASS |
+| 6 | 137.6488 ms | 7.140x | PASS |
+| 7 | 0.2895 ms | 10.298x | PASS |
+| 8 | 23.3075 ms | 4.256x | PASS |
+| 9 | 0.4924 ms | 6.816x | PASS |
+| 10 | 0.5122 ms | 7.028x | PASS |
+| 11 | 0.6353 ms | 26.882x | PASS |
+| 12 | 0.1701 ms | 14.712x | PASS |
+| 13 | 8.9474 ms | 29.333x | PASS |
 | 14 | n/a | n/a | OOM during input allocation |
 
 These are the exact outputs from a single official suite run. Laptop GPU clock
@@ -169,9 +169,13 @@ powershell -ExecutionPolicy Bypass -File .\run_custom_suite.ps1 `
 - exact GELU evaluated with FP32 values;
 - shape-specific Triton projection tiles;
 - custom FP32 causal attention on selected shapes;
-- cuDNN FP16 SDPA where profiling showed an end-to-end win;
-- fused FFN-output projection, residual addition, and LayerNorm for selected
-  D128 shapes;
+- a custom FP16 Tensor-Core causal-attention kernel on cases 6, 9, 10, 11,
+  and 13, with FP32 online-softmax statistics and accumulation;
+- fused attention-output projection, residual addition, and LayerNorm;
+- a complete fused D128 FFN, residual addition, and LayerNorm path;
+- FP16 storage for normalized inter-layer activations only on shapes where a
+  controlled comparison passed the error rule and improved runtime;
+- a specialized D32 projection/fusion route for case 7;
 - preallocated B64 microbatch execution for the very large case 6.
 
 Unsupported shapes safely fall back to PyTorch operations.
@@ -229,8 +233,12 @@ the 8 GB development GPU.
 
 ## Useful reports
 
-- `benchmark_logs/34_latest_implementation_test_results.md` — latest complete
-  test results.
+- `benchmark_logs/43_final_optimized_suite/results.csv` — latest complete test
+  results and strict-FP32 comparisons.
+- `BEST_IMPLEMENTATION.md` — exact retained dispatch, validation, and
+  reproducibility notes.
+- `benchmark_logs/35_current_mixed_profiler.md` — kernel-launch and operation
+  breakdown used to select the latest work.
 - `benchmark_logs/32_controlled_tournament_results.md` — controlled case 3 and
   case 11 route selection.
 - `benchmark_logs/29_skipped_techniques_results.md` — cuDNN SDPA,
