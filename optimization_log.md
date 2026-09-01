@@ -228,3 +228,168 @@ Cases 1-13 passed. Case 14 could not allocate its 12.21 GiB input on the 8 GiB G
 - Exact script outputs: `benchmark_logs/34_latest_implementation_test_results.md`.
 - Raw logs and CSV: `benchmark_logs/33_latest_implementation_tests/`.
 - Strict baseline SHA256 remained unchanged.
+
+## Experiment 14 — production-path GPU profile
+
+- Date: 2026-09-01.
+- Goal: identify the remaining launch, compute, and memory costs before adding
+  kernels.
+- Method: `torch.profiler` over 50 compiled forwards after warmup; kernel names
+  were grouped into projection, attention, residual/LayerNorm, cast/layout/GELU,
+  and copy categories.
+- Case 6: 7,850 launches (157 per forward); GEMMs 41.65% of GPU time,
+  attention 24.78%, residual/LayerNorm 18.97%, casts/layout/GELU 11.53%, and
+  copies 2.29%.
+- Case 8: 30 launches per forward; projection GEMMs 75.82%, residual/LayerNorm
+  14.56%, and attention 8.13%.
+- Case 11: attention 61.28%, projection GEMMs 26.89%, and residual/LayerNorm
+  9.50%.
+- Case 13: cuDNN SDPA 46.32%, projection GEMMs 20.78%, post-attention
+  LayerNorm 15.94%, and fused FFN-output/LayerNorm 13.85%.
+- Decision: prioritize custom mixed attention for cases 9–13, then eliminate
+  projection/residual/normalization launch boundaries. Leave case-8 GEMMs on
+  the already tuned Tensor-Core route.
+- Report: `benchmark_logs/35_current_mixed_profiler.md`.
+
+## Experiment 15 — attention-output projection/residual/LayerNorm fusion
+
+- Bottleneck addressed: the output projection's FP32 global-memory store,
+  reread for residual addition, reread for LayerNorm, and multiple launches.
+- Change: extended one Triton program to perform the FP16 Tensor-Core output
+  projection, FP32 residual addition, FP32 LayerNorm statistics, and both output
+  stores.
+- Controlled end-to-end gains: case 1 1.063x, case 4 1.019x, case 5 1.115x,
+  case 9 1.057x, case 10 1.034x, case 11 1.010x, case 12 1.013x, and case 13
+  1.084x.
+- Correctness: all tested cases passed three randomized trials with zero failed
+  elements.
+- Decision: RETAINED for exact D32/D128 dispatched shapes.
+- Raw logs: `benchmark_logs/35_attention_output_fusion/`.
+
+## Experiment 16 — complete D128 FFN/residual/LayerNorm fusion
+
+- Bottleneck addressed: two FFN launches, exact GELU launch, intermediate
+  activation traffic, output traffic, residual addition, and LayerNorm.
+- Change: one Triton program loads a row, executes both 128x128 Tensor-Core
+  projections with exact FP32 GELU between them, adds the FP32 residual,
+  computes FP32 LayerNorm, and writes the residual plus normalized stream.
+- Controlled gains when tested alone: case 1 1.056x, case 4 1.064x, case 9
+  1.060x, case 10 1.054x, case 11 1.024x, case 12 1.057x, and case 13 1.041x.
+- Case 5: incremental gain after the attention fusion was -0.2%, so the full
+  FFN fusion is disabled for this exact shape.
+- Correctness: every retained path passed three trials with zero failed values.
+- Decision: RETAINED with a case-5 exclusion.
+- Raw logs: `benchmark_logs/36_full_ffn_fusion/`,
+  `benchmark_logs/37_combined_d128_fusions/`, and
+  `benchmark_logs/38_incremental_full_ffn/`.
+
+## Experiment 17 — custom FP16 causal attention with FP32 softmax state
+
+- Bottleneck addressed: vendor attention dispatch and layout overhead, most
+  visibly case 11 (61% of profiled GPU time) and case 13 (46%).
+- Change: a from-scratch Triton tiled online-softmax kernel. Q/K/V and dot
+  operands are FP16 for Tensor Cores, while running maxima, normalization sums,
+  and output accumulators remain FP32. Output is written directly in B,S,H,D
+  layout for the following projection.
+- Isolated attention results: case 11's head-dimension-8 configuration was
+  3.05x faster; case 13 was 1.9231 ms vendor versus 0.7546 ms custom; cases 9
+  and 10 improved by 6.5% and 9.8%, respectively.
+- Full-model retained dispatch: cases 6, 9, 10, 11, and 13 only. Cases 1, 4,
+  and 5 showed no material gain or a regression and keep their prior route.
+- Correctness: each retained non-microbatched shape passed three trials with
+  zero failures; case 6 passed 0 / 491,520,000 failures with maximum absolute
+  error 0.00193438.
+- Decision: RETAINED with exact shape dispatch.
+- Reproducible tuner: `experimental_fp16_attention.py` and
+  `experimental_dispatch_tournament.py`.
+
+## Experiment 18 — small-batch D128 routes and cuDNN comparison
+
+- Bottleneck addressed: vendor launch overhead dominates batches 1 and 4.
+- Change: enable the D128 Triton projection route for cases 2 and 3 and use the
+  complete FFN fusion where beneficial.
+- Case 3: the D128 route reduced 0.152544 ms to 0.107872 ms in the controlled
+  route test (1.414x); adding the full FFN fusion later measured 0.0996 ms and
+  passed three accuracy trials.
+- Rejected alternative: grouped cuDNN attention looked favorable in an
+  exploratory measurement, but the official separate-event protocol measured
+  0.1237 ms versus 0.1084 ms for efficient SDPA.
+- Case 2: both fusions improved 2.65% in the controlled test; retained despite
+  the small margin.
+- Decision: RETAIN D128/fusion dispatch; REJECT cuDNN for case 3.
+- Raw experiments: `experiment_case2_d128_fusions.py`,
+  `experiment_case3_d128_backend.py`, and
+  `experiment_case3_d128_fusions.py`.
+
+## Experiment 19 — specialized D32 route
+
+- Bottleneck addressed: case 7's small 32-wide projections are launch- and
+  memory-bound, so generic vendor GEMMs underutilize the GPU.
+- Change: add D32 packed QKV and FFN tiles plus fused projection/residual/FP32
+  LayerNorm epilogues.
+- Controlled result: approximately 0.3908 ms to 0.2848 ms (1.37x).
+- Official final result: 0.2895 ms; maximum absolute error 0.00131706; zero
+  failed elements.
+- Decision: RETAINED for the exact D32 benchmark family.
+- Reproducible experiment: `experiment_case7_d32_route.py`.
+
+## Experiment 20 — FP16 normalized-activation storage
+
+- Bottleneck addressed: normalized activations feed FP16 projection kernels;
+  storing them as FP32 doubles their inter-kernel traffic and forces a cast on
+  the next load.
+- Change: residual values, LayerNorm arithmetic, softmax state, and final model
+  output remain FP32, but selected intermediate normalized tensors are stored
+  as FP16.
+- Controlled retained gains: case 4 1.021x, case 5 1.114x, case 7 1.031x,
+  case 8 1.064x, case 9 1.091x, case 10 1.091x, case 11 1.023x, case 12
+  1.048x, and case 13 1.113x.
+- Rejected shapes: case 1 measured 0.981x and case 3 measured 0.808x. Case 2
+  was conservatively left on FP32 normalized storage.
+- Correctness: all retained routes pass the official mixed absolute/relative
+  error rule; the final returned output is always FP32.
+- Decision: RETAINED only for cases 4, 5, and 7–13.
+- Raw logs: `benchmark_logs/40_case8_fp16_norm/` and
+  `benchmark_logs/41_fp16_normalized_stream/`.
+
+## Experiment 21 — case-8 tile/autotune re-audit
+
+- Bottleneck addressed: D1024 projection GEMMs account for 75.82% of case-8
+  GPU time.
+- Change tested: exhaustive nearby Triton tile, warp, stage, and group-size
+  alternatives for packed QKV and both FFN projections.
+- Result: the current tiles remained best; the best alternative group-size-16
+  result was under 1% and not repeatably separable from noise.
+- Decision: REJECTED. Keep the current hand-tuned D1024 route and the retained
+  FP16 normalized stream. A larger from-scratch GEMM is unlikely to beat the
+  current Tensor-Core schedule on this 26-SM GPU without a substantially deeper
+  architecture-specific search.
+- Reproducible tuner: `experimental_case8_tuner.py`.
+
+## Final 2026-09-01 retained state
+
+- Strict reference SHA256:
+  `E1925A209BBC2A536B0DE96870585D8422018107D0696D4EA1D196BC9A4BEE4A`.
+- Environment: NVIDIA GeForce RTX 5060 Laptop GPU (8,518,041,600 bytes),
+  PyTorch 2.13.0+cu130, CUDA 13.0, Triton 3.7.1.
+- Official protocol: one accuracy trial, three warmups, ten timed repeats, one
+  benchmark round; CUDA-event latency excludes compilation and data generation.
+- Cases 1–13: PASS, zero failed output elements in every case.
+- Case 14: OOM while allocating the nominal input; neither baseline nor
+  candidate execution is reached.
+- Candidate medians (cases 1–13): 0.6424, 0.1252, 0.1285, 0.1692, 1.1638,
+  137.6488, 0.2895, 23.3075, 0.4924, 0.5122, 0.6353, 0.1701, and 8.9474 ms.
+- Speedups: 7.184x, 19.515x, 18.476x, 11.454x, 10.764x, 7.140x, 10.298x,
+  4.256x, 6.816x, 7.028x, 26.882x, 14.712x, and 29.333x.
+- Raw logs and exact errors: `benchmark_logs/43_final_optimized_suite/`.
+- Retained dispatch description: `BEST_IMPLEMENTATION.md`.
+- High-confidence follow-up (`accuracy-trials=3`, `warmup=10`, `repeats=30`,
+  `benchmark-rounds=3`): case 11 0.6477 ms, max abs 0.00122881, failed
+  0 / 3,145,728; case 7 0.2907 ms, max abs 0.00136477, failed 0 / 786,432;
+  case 13 8.2941 ms, max abs 0.00131273, failed 0 / 25,165,824.
+- The benchmark exposes no aggregate score formula, so score change is not
+  reported. Compared with the session-start suite, candidate latency improved
+  by a 1.204x geometric mean across cases 1–13; the sum of candidate medians
+  improved by 1.062x. Cross-run timing noise made cases 1 and 2 appear 3.8%
+  and 5.0% slower in the final sweep, while their same-process route tests
+  measured gains of 13.2% (case 1 combined fusions) and 2.65% (case 2).

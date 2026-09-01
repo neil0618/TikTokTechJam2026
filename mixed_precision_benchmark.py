@@ -64,6 +64,17 @@ def main() -> int:
     baseline = baseline.to(device=device, dtype=torch.float32).eval()
     mixed = mixed.to(device=device).eval()
     mixed.convert_projections_to_fp16()
+    dispatch = {
+        "case8_triton": mixed.use_case8_triton,
+        "d128_triton": mixed.use_d128_triton,
+        "d128_fp32_attention": mixed.use_d128_custom_attention,
+        "fp16_custom_attention": mixed.use_fp16_custom_attention,
+        "case11_schedule": mixed.use_case11_schedule,
+        "attention_output_norm_fusion": mixed.fuse_attention_output_norm,
+        "full_ffn_fusion": mixed.fuse_full_ffn,
+        "fp16_normalized_stream": mixed.use_fp16_normalized_stream,
+        "d32_triton": mixed.use_d32_triton,
+    }
 
     baseline_microbatch_size = args.microbatch_size
     mixed_microbatch_size = args.microbatch_size
@@ -86,50 +97,18 @@ def main() -> int:
     print(config)
     print(f"device={device}, baseline_dtype=torch.float32, baseline_tf32=False")
     print("mixed_policy=FP16 projections; FP32 accumulation/reductions/GELU/residual/LayerNorm/output")
-    case8_triton = (
-        config.batch_size == 64
-        and config.seq_len == 128
-        and config.d_model == 1024
-        and config.num_heads == 4
-        and config.ffn_dim == 1024
-        and config.num_layers == 4
-        and config.causal
+    print(f"case8_custom_triton_projections={dispatch['case8_triton']}")
+    print(f"d128_custom_triton_projections={dispatch['d128_triton']}")
+    print(f"d32_custom_triton_projections={dispatch['d32_triton']}")
+    print(f"d128_custom_triton_attention={dispatch['d128_fp32_attention']}")
+    print(f"fp16_custom_triton_attention={dispatch['fp16_custom_attention']}")
+    print(f"case11_expanded_d128_schedule={dispatch['case11_schedule']}")
+    print(
+        "attention_output_norm_fusion="
+        f"{dispatch['attention_output_norm_fusion']}"
     )
-    print(f"case8_custom_triton_projections={case8_triton}")
-    d128_triton = (
-        config.d_model == 128
-        and config.ffn_dim == 128
-        and config.num_layers == 4
-        and config.causal
-        and (
-            (
-                config.num_heads == 4
-                and (
-                    (config.batch_size == 128 and config.seq_len == 128)
-                    or (config.batch_size == 64 and config.seq_len in (32, 128, 1024))
-                    or (config.batch_size == 16 and config.seq_len == 128)
-                )
-            )
-            or (
-                config.batch_size == 64
-                and config.seq_len == 128
-                and config.num_heads in (1, 2, 16)
-            )
-        )
-    )
-    d128_attention = d128_triton and config.num_heads == 4 and config.seq_len == 128
-    case11_schedule = (
-        config.batch_size == 64
-        and config.seq_len == 128
-        and config.d_model == 128
-        and config.num_heads == 16
-        and config.ffn_dim == 128
-        and config.num_layers == 4
-        and config.causal
-    )
-    print(f"d128_custom_triton_projections={d128_triton}")
-    print(f"d128_custom_triton_attention={d128_attention}")
-    print(f"case11_expanded_d128_schedule={case11_schedule}")
+    print(f"full_ffn_fusion={dispatch['full_ffn_fusion']}")
+    print(f"fp16_normalized_stream={dispatch['fp16_normalized_stream']}")
     print(f"compile_baseline={args.compile_baseline}, compile_mixed={compile_mixed}, compile_mode={args.compile_mode}")
     print(f"baseline_microbatch_size={baseline_microbatch_size or 'disabled'}")
     print(f"mixed_microbatch_size={mixed_microbatch_size or 'disabled'}")

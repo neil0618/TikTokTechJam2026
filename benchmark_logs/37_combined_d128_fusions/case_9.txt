@@ -1,0 +1,22 @@
+case=9 config=TransformerConfig(batch_size=64, seq_len=128, d_model=128, num_heads=1, ffn_dim=128, num_layers=4, causal=True)
+gpu=NVIDIA GeForce RTX 5060 Laptop GPU
+protocol=accuracy:3, warmup:10, repeats:30, rounds:5
+accuracy trial=1 route=incumbent status=PASS max_abs=0.00120425 failed=0/1048576
+accuracy trial=1 route=fused_attention_and_full_ffn status=PASS max_abs=0.00120437 failed=0/1048576
+accuracy trial=2 route=incumbent status=PASS max_abs=0.00123921 failed=0/1048576
+accuracy trial=2 route=fused_attention_and_full_ffn status=PASS max_abs=0.00123921 failed=0/1048576
+accuracy trial=3 route=incumbent status=PASS max_abs=0.00116861 failed=0/1048576
+accuracy trial=3 route=fused_attention_and_full_ffn status=PASS max_abs=0.00111514 failed=0/1048576
+round=1 route=incumbent median_ms=0.553360
+round=1 route=fused_attention_and_full_ffn median_ms=0.579648
+round=2 route=fused_attention_and_full_ffn median_ms=0.581824
+round=2 route=incumbent median_ms=0.646928
+round=3 route=incumbent median_ms=0.636912
+round=3 route=fused_attention_and_full_ffn median_ms=0.573552
+round=4 route=fused_attention_and_full_ffn median_ms=0.590064
+round=4 route=incumbent median_ms=0.657552
+round=5 route=incumbent median_ms=0.652272
+round=5 route=fused_attention_and_full_ffn median_ms=0.591088
+result route=incumbent median_ms=0.648112 mean_ms=0.767611 min_ms=0.549088
+result route=fused_attention_and_full_ffn median_ms=0.584336 mean_ms=0.696994 min_ms=0.567168
+challenger_speedup=1.109143x

@@ -17,8 +17,18 @@ from torch.nn.attention import SDPBackend, sdpa_kernel
 
 from torch_transformer_benchmark import TransformerConfig, fused_add_layer_norm
 
-from custom_kernel.triton_attention import causal_attention, is_supported
-from .triton_linear import mixed_linear, mixed_linear_add_layer_norm
+from custom_kernel.triton_attention import (
+    causal_attention,
+    fp16_causal_attention,
+    is_fp16_supported,
+    is_supported,
+)
+from .triton_linear import (
+    mixed_add_layer_norm,
+    mixed_ffn_add_layer_norm,
+    mixed_linear,
+    mixed_linear_add_layer_norm,
+)
 
 
 class MixedPrecisionSelfAttention(nn.Module):
@@ -28,8 +38,12 @@ class MixedPrecisionSelfAttention(nn.Module):
         num_heads: int,
         use_case8_triton: bool,
         use_d128_triton: bool,
+        use_d32_triton: bool,
         use_d128_custom_attention: bool,
         use_case11_schedule: bool = False,
+        fuse_output_norm: bool = False,
+        use_fp16_custom_attention: bool = False,
+        use_fp16_normalized_stream: bool = False,
     ) -> None:
         super().__init__()
         self.d_model = d_model
@@ -38,8 +52,12 @@ class MixedPrecisionSelfAttention(nn.Module):
         self.scale = self.head_dim**-0.5
         self.use_case8_triton = use_case8_triton
         self.use_d128_triton = use_d128_triton
+        self.use_d32_triton = use_d32_triton
         self.use_d128_custom_attention = use_d128_custom_attention
         self.use_case11_schedule = use_case11_schedule
+        self.fuse_output_norm = fuse_output_norm
+        self.use_fp16_custom_attention = use_fp16_custom_attention
+        self.use_fp16_normalized_stream = use_fp16_normalized_stream
         self.qkv_proj = nn.Linear(d_model, 3 * d_model, bias=True)
         self.out_proj = nn.Linear(d_model, d_model, bias=True)
 
@@ -52,7 +70,9 @@ class MixedPrecisionSelfAttention(nn.Module):
         normalized_fp32: torch.Tensor,
         valid_token_mask: Optional[torch.Tensor] = None,
         causal: bool = False,
-    ) -> torch.Tensor:
+        residual_fp32: Optional[torch.Tensor] = None,
+        next_norm: Optional[nn.LayerNorm] = None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         batch, seq_len, _ = normalized_fp32.shape
         if self.use_case8_triton:
             qkv_fp16 = mixed_linear(
@@ -98,6 +118,18 @@ class MixedPrecisionSelfAttention(nn.Module):
                 num_stages=2,
                 group_m=qkv_config[4],
             )
+        elif self.use_d32_triton:
+            qkv_fp16 = mixed_linear(
+                normalized_fp32,
+                self.qkv_proj,
+                output_dtype=torch.float16,
+                block_m=64,
+                block_n=32,
+                block_k=32,
+                group_m=4,
+                num_warps=2,
+                num_stages=2,
+            )
         else:
             qkv_fp16 = self.qkv_proj(normalized_fp32.to(torch.float16))
         qkv_fp16 = qkv_fp16.view(
@@ -110,6 +142,14 @@ class MixedPrecisionSelfAttention(nn.Module):
             else valid_token_mask[:, None, None, :]
         )
         if (
+            self.use_fp16_custom_attention
+            and attention_mask is None
+            and is_fp16_supported(q, k, v, causal)
+        ):
+            context_fp16 = fp16_causal_attention(q, k, v, self.scale).view(
+                batch, seq_len, self.d_model
+            )
+        elif (
             self.use_d128_custom_attention
             and attention_mask is None
             and is_supported(q, k, v, causal)
@@ -153,6 +193,33 @@ class MixedPrecisionSelfAttention(nn.Module):
             )
         # The residual stream never becomes FP16. The case-8 kernel retains
         # the Tensor-Core accumulator in FP32 through the final store.
+        if self.fuse_output_norm:
+            if residual_fp32 is None or next_norm is None:
+                raise ValueError("fused attention output requires residual and norm")
+            n_rows = batch * seq_len
+            if n_rows >= 65536:
+                fused_config = (16, 64, 4)
+            elif n_rows >= 16384:
+                fused_config = (32, 32, 4)
+            elif n_rows >= 8192:
+                fused_config = (32, 32, 8)
+            else:
+                fused_config = (32, 32, 4)
+            return mixed_linear_add_layer_norm(
+                context_fp16,
+                self.out_proj,
+                residual_fp32,
+                next_norm,
+                block_m=fused_config[0],
+                block_k=fused_config[1],
+                num_warps=fused_config[2],
+                num_stages=2,
+                normalized_dtype=(
+                    torch.float16
+                    if self.use_fp16_normalized_stream
+                    else torch.float32
+                ),
+            )
         if self.use_case8_triton:
             return mixed_linear(
                 context_fp16,
@@ -191,6 +258,18 @@ class MixedPrecisionSelfAttention(nn.Module):
                 num_stages=2,
                 group_m=output_config[3],
             )
+        if self.use_d32_triton:
+            return mixed_linear(
+                context_fp16,
+                self.out_proj,
+                output_dtype=torch.float32,
+                block_m=64,
+                block_n=32,
+                block_k=16,
+                group_m=4,
+                num_warps=2,
+                num_stages=2,
+            )
         return self.out_proj(context_fp16).to(torch.float32)
 
 
@@ -202,8 +281,13 @@ class MixedPrecisionTransformerBlock(nn.Module):
         ffn_dim: int,
         use_case8_triton: bool,
         use_d128_triton: bool,
+        use_d32_triton: bool,
         use_d128_custom_attention: bool,
         use_case11_schedule: bool = False,
+        fuse_attention_output_norm: bool = False,
+        fuse_full_ffn: bool = False,
+        use_fp16_custom_attention: bool = False,
+        use_fp16_normalized_stream: bool = False,
     ) -> None:
         super().__init__()
         self.norm1 = nn.LayerNorm(d_model)
@@ -212,15 +296,22 @@ class MixedPrecisionTransformerBlock(nn.Module):
             num_heads,
             use_case8_triton,
             use_d128_triton,
+            use_d32_triton,
             use_d128_custom_attention,
             use_case11_schedule,
+            fuse_attention_output_norm,
+            use_fp16_custom_attention,
+            use_fp16_normalized_stream,
         )
         self.norm2 = nn.LayerNorm(d_model)
         self.ffn_in = nn.Linear(d_model, ffn_dim)
         self.ffn_out = nn.Linear(ffn_dim, d_model)
         self.use_case8_triton = use_case8_triton
         self.use_d128_triton = use_d128_triton
+        self.use_d32_triton = use_d32_triton
         self.use_case11_schedule = use_case11_schedule
+        self.fuse_attention_output_norm = fuse_attention_output_norm
+        self.fuse_full_ffn = fuse_full_ffn
 
     def convert_projections_to_fp16(self) -> None:
         self.attention.convert_projections_to_fp16()
@@ -236,6 +327,10 @@ class MixedPrecisionTransformer(nn.Module):
         config: TransformerConfig,
         *,
         enable_case11_schedule: bool = True,
+        enable_attention_output_norm_fusion: bool = True,
+        enable_full_ffn_fusion: bool = True,
+        enable_fp16_custom_attention: bool = True,
+        enable_fp16_normalized_stream: bool = True,
     ) -> None:
         super().__init__()
         self.config = config
@@ -260,6 +355,8 @@ class MixedPrecisionTransformer(nn.Module):
                         (config.batch_size == 128 and config.seq_len == 128)
                         or (config.batch_size == 64 and config.seq_len in (32, 128, 1024))
                         or (config.batch_size == 16 and config.seq_len == 128)
+                        or (config.batch_size == 4 and config.seq_len == 128)
+                        or (config.batch_size == 1 and config.seq_len == 128)
                     )
                 )
                 or (
@@ -269,10 +366,34 @@ class MixedPrecisionTransformer(nn.Module):
                 )
             )
         )
+        self.use_d32_triton = (
+            config.batch_size == 64
+            and config.seq_len == 128
+            and config.d_model == 32
+            and config.num_heads == 4
+            and config.ffn_dim == 32
+            and config.num_layers == 4
+            and config.causal
+        )
+        self.use_fp16_normalized_stream = (
+            enable_fp16_normalized_stream
+            and (
+                self.use_case8_triton
+                or self.use_d128_triton
+                or self.use_d32_triton
+            )
+            and not (
+                self.use_d128_triton
+                and config.num_heads == 4
+                and config.seq_len == 128
+                and config.batch_size in (1, 4, 64)
+            )
+        )
         self.use_d128_custom_attention = (
             self.use_d128_triton
             and config.num_heads == 4
             and config.seq_len == 128
+            and config.batch_size not in (1, 4)
         )
         self.use_case11_schedule = (
             enable_case11_schedule
@@ -284,6 +405,47 @@ class MixedPrecisionTransformer(nn.Module):
             and config.num_layers == 4
             and config.causal
         )
+        self.fuse_attention_output_norm = (
+            enable_attention_output_norm_fusion
+            and (
+                self.use_d32_triton
+                or (
+                    self.use_d128_triton
+                    and config.batch_size != 4
+                )
+            )
+        )
+        self.fuse_full_ffn = (
+            enable_full_ffn_fusion
+            and self.use_d128_triton
+            and config.batch_size != 128
+        )
+        self.use_fp16_custom_attention = (
+            enable_fp16_custom_attention
+            and config.d_model == 128
+            and (
+                (
+                    config.batch_size == 64
+                    and config.num_heads == 4
+                    and config.seq_len == 1024
+                )
+                or (
+                    config.batch_size == 64
+                    and config.num_heads in (1, 2, 16)
+                    and config.seq_len == 128
+                )
+                or (
+                    config.batch_size == 10000
+                    and config.num_heads == 4
+                    and config.seq_len == 128
+                )
+            )
+            and config.ffn_dim == 128
+            and config.num_layers == 4
+            and config.causal
+        )
+        if self.use_fp16_custom_attention:
+            self.use_d128_custom_attention = False
         self.layers = nn.ModuleList(
             [
                 MixedPrecisionTransformerBlock(
@@ -292,8 +454,13 @@ class MixedPrecisionTransformer(nn.Module):
                     config.ffn_dim,
                     self.use_case8_triton,
                     self.use_d128_triton,
+                    self.use_d32_triton,
                     self.use_d128_custom_attention,
                     self.use_case11_schedule,
+                    self.fuse_attention_output_norm,
+                    self.fuse_full_ffn,
+                    self.use_fp16_custom_attention,
+                    self.use_fp16_normalized_stream,
                 )
                 for _ in range(config.num_layers)
             ]
@@ -315,13 +482,32 @@ class MixedPrecisionTransformer(nn.Module):
 
         effective_mask = None if self.assume_all_tokens_valid else valid_token_mask
         normalized = self.layers[0].norm1(x)
+        if self.use_fp16_normalized_stream:
+            normalized = normalized.to(torch.float16)
         for layer_index, layer in enumerate(self.layers):
-            attention_output = layer.attention(
-                normalized, effective_mask, self.config.causal
-            )
-            x, normalized_ffn = fused_add_layer_norm(
-                x, attention_output, layer.norm2
-            )
+            if layer.fuse_attention_output_norm:
+                x, normalized_ffn = layer.attention(
+                    normalized,
+                    effective_mask,
+                    self.config.causal,
+                    residual_fp32=x,
+                    next_norm=layer.norm2,
+                )
+            else:
+                attention_output = layer.attention(
+                    normalized, effective_mask, self.config.causal
+                )
+                if self.use_fp16_normalized_stream:
+                    x, normalized_ffn = mixed_add_layer_norm(
+                        x,
+                        attention_output,
+                        layer.norm2,
+                        normalized_dtype=torch.float16,
+                    )
+                else:
+                    x, normalized_ffn = fused_add_layer_norm(
+                        x, attention_output, layer.norm2
+                    )
             next_norm = (
                 self.layers[layer_index + 1].norm1
                 if layer_index + 1 < len(self.layers)
@@ -351,6 +537,60 @@ class MixedPrecisionTransformer(nn.Module):
                     num_warps=4,
                     num_stages=3,
                 )
+            elif layer.fuse_full_ffn:
+                x, normalized = mixed_ffn_add_layer_norm(
+                    normalized_ffn,
+                    layer.ffn_in,
+                    layer.ffn_out,
+                    x,
+                    next_norm,
+                    block_m=16,
+                    num_warps=4,
+                    num_stages=2,
+                    normalized_dtype=(
+                        torch.float32
+                        if layer_index + 1 == len(self.layers)
+                        else (
+                            torch.float16
+                            if self.use_fp16_normalized_stream
+                            else torch.float32
+                        )
+                    ),
+                )
+                ffn_norm_fused = True
+            elif layer.use_d32_triton:
+                activated_fp16 = mixed_linear(
+                    normalized_ffn,
+                    layer.ffn_in,
+                    output_dtype=torch.float16,
+                    fuse_gelu=True,
+                    block_m=64,
+                    block_n=32,
+                    block_k=16,
+                    group_m=4,
+                    num_warps=2,
+                    num_stages=2,
+                )
+                x, normalized = mixed_linear_add_layer_norm(
+                    activated_fp16,
+                    layer.ffn_out,
+                    x,
+                    next_norm,
+                    block_m=64,
+                    block_k=16,
+                    num_warps=2,
+                    num_stages=2,
+                    normalized_dtype=(
+                        torch.float32
+                        if layer_index + 1 == len(self.layers)
+                        else (
+                            torch.float16
+                            if self.use_fp16_normalized_stream
+                            else torch.float32
+                        )
+                    ),
+                )
+                ffn_norm_fused = True
             elif layer.use_d128_triton:
                 n_rows = normalized_ffn.numel() // 128
                 if n_rows >= 16384:
@@ -410,6 +650,15 @@ class MixedPrecisionTransformer(nn.Module):
                         block_k=fused_out_config[1],
                         num_warps=fused_out_config[2],
                         num_stages=2,
+                        normalized_dtype=(
+                            torch.float32
+                            if layer_index + 1 == len(self.layers)
+                            else (
+                                torch.float16
+                                if self.use_fp16_normalized_stream
+                                else torch.float32
+                            )
+                        ),
                     )
                     ffn_norm_fused = True
             else:
@@ -423,7 +672,22 @@ class MixedPrecisionTransformer(nn.Module):
                 ).to(torch.float32)
 
             if not ffn_norm_fused:
-                x, normalized = fused_add_layer_norm(x, ffn_output, next_norm)
+                if self.use_fp16_normalized_stream:
+                    normalized_dtype = (
+                        torch.float32
+                        if layer_index + 1 == len(self.layers)
+                        else torch.float16
+                    )
+                    x, normalized = mixed_add_layer_norm(
+                        x,
+                        ffn_output,
+                        next_norm,
+                        normalized_dtype=normalized_dtype,
+                    )
+                else:
+                    x, normalized = fused_add_layer_norm(
+                        x, ffn_output, next_norm
+                    )
 
         if effective_mask is not None:
             return normalized.masked_fill(~effective_mask[..., None], 0)
