@@ -19,6 +19,7 @@ from torch_transformer_benchmark import TransformerConfig
 
 
 CASES = {
+    2: TransformerConfig(1, 128, 128, 4, 128, 4, True),
     6: TransformerConfig(10000, 128, 128, 4, 128, 4, True),
     8: TransformerConfig(64, 128, 1024, 4, 1024, 4, True),
     10: TransformerConfig(64, 128, 128, 2, 128, 4, True),

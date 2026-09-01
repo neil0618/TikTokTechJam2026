@@ -19,11 +19,13 @@ def force_route(
     *,
     attention_fusion: bool,
     full_ffn_fusion: bool,
+    fp16_normalized_stream: bool = False,
 ) -> None:
     model.use_d128_triton = True
     model.use_d128_custom_attention = False
     model.fuse_attention_output_norm = attention_fusion
     model.fuse_full_ffn = full_ffn_fusion
+    model.use_fp16_normalized_stream = fp16_normalized_stream
     for layer in model.layers:
         layer.use_d128_triton = True
         layer.attention.use_d128_triton = True
@@ -31,6 +33,7 @@ def force_route(
         layer.fuse_attention_output_norm = attention_fusion
         layer.attention.fuse_output_norm = attention_fusion
         layer.fuse_full_ffn = full_ffn_fusion
+        layer.attention.use_fp16_normalized_stream = fp16_normalized_stream
 
 
 def grouped_ms(model, x, mask, repeats: int = 1000) -> float:
@@ -57,7 +60,15 @@ def main() -> int:
     attention_fused = MixedPrecisionTransformer(CONFIG).to(device).eval()
     full_ffn = MixedPrecisionTransformer(CONFIG).to(device).eval()
     all_fused = MixedPrecisionTransformer(CONFIG).to(device).eval()
-    for model in (vendor, d128, attention_fused, full_ffn, all_fused):
+    all_fused_fp16_norm = MixedPrecisionTransformer(CONFIG).to(device).eval()
+    for model in (
+        vendor,
+        d128,
+        attention_fused,
+        full_ffn,
+        all_fused,
+        all_fused_fp16_norm,
+    ):
         copy_mixed_model_weights(reference, model)
         model.assume_all_tokens_valid = True
         model.convert_projections_to_fp16()
@@ -65,6 +76,12 @@ def main() -> int:
     force_route(attention_fused, attention_fusion=True, full_ffn_fusion=False)
     force_route(full_ffn, attention_fusion=False, full_ffn_fusion=True)
     force_route(all_fused, attention_fusion=True, full_ffn_fusion=True)
+    force_route(
+        all_fused_fp16_norm,
+        attention_fusion=True,
+        full_ffn_fusion=True,
+        fp16_normalized_stream=True,
+    )
     models = {
         "vendor": torch.compile(vendor, mode="reduce-overhead"),
         "d128": torch.compile(d128, mode="reduce-overhead"),
@@ -73,6 +90,9 @@ def main() -> int:
         ),
         "d128_full_ffn": torch.compile(full_ffn, mode="reduce-overhead"),
         "d128_all_fused": torch.compile(all_fused, mode="reduce-overhead"),
+        "d128_all_fused_fp16_norm": torch.compile(
+            all_fused_fp16_norm, mode="reduce-overhead"
+        ),
     }
     passed = True
     with torch.inference_mode():
@@ -103,6 +123,7 @@ def main() -> int:
                 "d128",
                 "vendor",
                 "d128_all_fused",
+                "d128_all_fused_fp16_norm",
                 "d128_full_ffn",
                 "d128_attention_fused",
             ),

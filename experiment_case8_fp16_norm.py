@@ -13,6 +13,7 @@ from mixed_precision import MixedPrecisionTransformer, copy_mixed_model_weights
 
 
 CASES = {
+    2: bench.TransformerConfig(1, 128, 128, 4, 128, 4, True),
     1: bench.TransformerConfig(64, 128, 128, 4, 128, 4, True),
     3: bench.TransformerConfig(4, 128, 128, 4, 128, 4, True),
     4: bench.TransformerConfig(16, 128, 128, 4, 128, 4, True),
@@ -43,6 +44,10 @@ def main() -> int:
     challenger = MixedPrecisionTransformer(
         config, enable_fp16_normalized_stream=True
     )
+    if args.case == 2:
+        challenger.use_fp16_normalized_stream = True
+        for layer in challenger.layers:
+            layer.attention.use_fp16_normalized_stream = True
     for model in (incumbent, challenger):
         copy_mixed_model_weights(reference, model)
         model.assume_all_tokens_valid = True
