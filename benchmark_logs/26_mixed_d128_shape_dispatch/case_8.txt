@@ -1,0 +1,22 @@
+=== Strict-FP32 baseline vs mixed candidate ===
+TransformerConfig(batch_size=64, seq_len=128, d_model=1024, num_heads=4, ffn_dim=1024, num_layers=4, causal=True)
+device=cuda, baseline_dtype=torch.float32, baseline_tf32=False
+mixed_policy=FP16 projections; FP32 accumulation/reductions/GELU/residual/LayerNorm/output
+case8_custom_triton_projections=True
+d128_custom_triton_projections=False
+d128_custom_triton_attention=False
+compile_baseline=False, compile_mixed=True, compile_mode=reduce-overhead
+microbatch_size=disabled
+gpu=NVIDIA GeForce RTX 5060 Laptop GPU
+
+=== Accuracy check ===
+criterion: abs_error <= 0.002 OR relative_error <= 2.00%
+trial 01/1: PASS | max_abs=0.00119174 | max_rel=696.451 | failed=0/8388608
+summary: PASS | max_abs=0.00119174 | max_rel=696.451 | failed=0/8388608
+
+=== Performance benchmark ===
+timing excludes random-data generation and uses a fixed input
+CUDA latency is measured with torch.cuda.Event on the current stream
+baseline : median=78.7416 ms | mean=81.5859 ms | p90=88.4601 ms | min=77.4869 ms | throughput=104036.47 token/s
+optimized: median=25.4779 ms | mean=24.9584 ms | p90=26.7642 ms | min=21.6735 ms | throughput=321533.51 token/s
+speedup  : 3.091x based on median latency

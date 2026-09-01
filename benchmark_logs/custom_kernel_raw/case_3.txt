@@ -1,0 +1,19 @@
+=== Custom-kernel configuration ===
+TransformerConfig(batch_size=4, seq_len=128, d_model=128, num_heads=4, ffn_dim=128, num_layers=4, causal=True)
+device=cuda, dtype=torch.float32, torch=2.13.0+cu130
+compile_baseline=False, compile_custom=True, compile_mode=reduce-overhead
+microbatch_size=disabled
+custom_attention_active=True
+gpu=NVIDIA GeForce RTX 5060 Laptop GPU
+
+=== Accuracy check ===
+criterion: abs_error <= 0.002 OR relative_error <= 2.00%
+trial 01/1: PASS | max_abs=0.00125545 | max_rel=51.987 | failed=0/65536
+summary: PASS | max_abs=0.00125545 | max_rel=51.987 | failed=0/65536
+
+=== Performance benchmark ===
+timing excludes random-data generation and uses a fixed input
+CUDA latency is measured with torch.cuda.Event on the current stream
+baseline : median=1.9437 ms | mean=2.2017 ms | p90=2.7274 ms | min=1.7955 ms | throughput=263417.85 token/s
+optimized: median=0.1299 ms | mean=0.1562 ms | p90=0.2003 ms | min=0.1117 ms | throughput=3942343.18 token/s
+speedup  : 14.966x based on median latency

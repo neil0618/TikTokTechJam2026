@@ -16,7 +16,9 @@ from __future__ import annotations
 import argparse
 import copy
 import math
+import os
 import statistics
+import tempfile
 import time
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
@@ -24,6 +26,81 @@ from typing import Dict, List, Optional, Tuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+os.environ.setdefault(
+    "TRITON_CACHE_DIR", os.path.join(tempfile.gettempdir(), "transformer-triton-cache")
+)
+import triton
+import triton.language as tl
+
+
+@triton.jit
+def _fused_add_layer_norm_kernel(
+    x_ptr,
+    update_ptr,
+    weight_ptr,
+    bias_ptr,
+    residual_ptr,
+    normalized_ptr,
+    N_COLS: tl.constexpr,
+    EPS: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    """Add a residual update and normalize the resulting row in one pass."""
+    row = tl.program_id(0)
+    offsets = tl.arange(0, BLOCK_SIZE)
+    mask = offsets < N_COLS
+    row_offsets = row * N_COLS + offsets
+
+    x = tl.load(x_ptr + row_offsets, mask=mask, other=0.0).to(tl.float32)
+    update = tl.load(update_ptr + row_offsets, mask=mask, other=0.0).to(
+        tl.float32
+    )
+    residual = x + update
+    mean = tl.sum(residual, axis=0) / N_COLS
+    centered = residual - mean
+    variance = tl.sum(centered * centered, axis=0) / N_COLS
+    reciprocal_std = tl.rsqrt(variance + EPS)
+    weight = tl.load(weight_ptr + offsets, mask=mask, other=0.0).to(tl.float32)
+    bias = tl.load(bias_ptr + offsets, mask=mask, other=0.0).to(tl.float32)
+    normalized = centered * reciprocal_std * weight + bias
+
+    tl.store(residual_ptr + row_offsets, residual, mask=mask)
+    tl.store(normalized_ptr + row_offsets, normalized, mask=mask)
+
+
+def fused_add_layer_norm(
+    x: torch.Tensor, update: torch.Tensor, norm: nn.LayerNorm
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Return both ``x + update`` and its LayerNorm result."""
+    if not (x.is_cuda and x.is_contiguous() and update.is_contiguous()):
+        residual = x + update
+        return residual, norm(residual)
+
+    n_cols = x.shape[-1]
+    n_rows = x.numel() // n_cols
+    block_size = triton.next_power_of_2(n_cols)
+    if block_size <= 64:
+        num_warps = 2
+    elif block_size <= 256:
+        num_warps = 1
+    else:
+        num_warps = 8
+    residual = torch.empty_like(x)
+    normalized = torch.empty_like(x)
+    _fused_add_layer_norm_kernel[(n_rows,)](
+        x,
+        update,
+        norm.weight,
+        norm.bias,
+        residual,
+        normalized,
+        N_COLS=n_cols,
+        EPS=norm.eps,
+        BLOCK_SIZE=block_size,
+        num_warps=num_warps,
+    )
+    return residual, normalized
 
 
 @dataclass(frozen=True)
@@ -172,6 +249,77 @@ class BaselineTransformer(nn.Module):
         return x
 
 
+class UserOptimizedSelfAttention(nn.Module):
+    """Candidate attention backed by PyTorch scaled-dot-product attention."""
+
+    def __init__(self, d_model: int, num_heads: int) -> None:
+        super().__init__()
+        if d_model % num_heads != 0:
+            raise ValueError("d_model must be divisible by num_heads")
+
+        self.d_model = d_model
+        self.num_heads = num_heads
+        self.head_dim = d_model // num_heads
+        self.scale = self.head_dim**-0.5
+        self.qkv_proj = nn.Linear(d_model, 3 * d_model, bias=True)
+        self.out_proj = nn.Linear(d_model, d_model, bias=True)
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        valid_token_mask: Optional[torch.Tensor] = None,
+        causal: bool = False,
+    ) -> torch.Tensor:
+        batch, seq_len, _ = x.shape
+
+        qkv = self.qkv_proj(x).view(
+            batch, seq_len, 3, self.num_heads, self.head_dim
+        )
+        q, k, v = qkv.permute(2, 0, 3, 1, 4).unbind(dim=0)
+
+        attention_mask = None
+        use_causal_hint = causal
+        if valid_token_mask is not None:
+            attention_mask = valid_token_mask[:, None, None, :]
+
+        context = F.scaled_dot_product_attention(
+            q,
+            k,
+            v,
+            attn_mask=attention_mask,
+            dropout_p=0.0,
+            is_causal=use_causal_hint,
+            scale=self.scale,
+        )
+        context = (
+            context.transpose(1, 2)
+            .contiguous()
+            .view(batch, seq_len, self.d_model)
+        )
+        output = self.out_proj(context)
+        return output
+
+
+class UserOptimizedTransformerBlock(nn.Module):
+    def __init__(self, d_model: int, num_heads: int, ffn_dim: int) -> None:
+        super().__init__()
+        self.norm1 = nn.LayerNorm(d_model)
+        self.attention = UserOptimizedSelfAttention(d_model, num_heads)
+        self.norm2 = nn.LayerNorm(d_model)
+        self.ffn_in = nn.Linear(d_model, ffn_dim)
+        self.ffn_out = nn.Linear(ffn_dim, d_model)
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        valid_token_mask: Optional[torch.Tensor],
+        causal: bool,
+    ) -> torch.Tensor:
+        x = x + self.attention(self.norm1(x), valid_token_mask, causal)
+        x = x + self.ffn_out(F.gelu(self.ffn_in(self.norm2(x)), approximate="none"))
+        return x
+
+
 class UserOptimizedTransformer(BaselineTransformer):
     """
     Replace this class with the optimized implementation.
@@ -181,6 +329,20 @@ class UserOptimizedTransformer(BaselineTransformer):
       2. Return a tensor with shape [batch_size, seq_len, d_model].
       3. Keep compatible parameter names, or customize copy_model_weights().
     """
+
+    def __init__(self, config: TransformerConfig) -> None:
+        nn.Module.__init__(self)
+        self.config = config
+        self.layers = nn.ModuleList(
+            [
+                UserOptimizedTransformerBlock(
+                    config.d_model, config.num_heads, config.ffn_dim
+                )
+                for _ in range(config.num_layers)
+            ]
+        )
+        self.final_norm = nn.LayerNorm(config.d_model)
+        self.assume_all_tokens_valid = False
 
     def forward(
         self,
@@ -196,7 +358,32 @@ class UserOptimizedTransformer(BaselineTransformer):
         #
         # The default implementation calls the baseline so that this script
         # remains directly runnable before the optimized code is inserted.
-        return super().forward(x, valid_token_mask)
+        effective_mask = None if self.assume_all_tokens_valid else valid_token_mask
+        if effective_mask is not None:
+            for layer in self.layers:
+                x = layer(x, effective_mask, self.config.causal)
+            x = self.final_norm(x)
+            return x.masked_fill(~effective_mask[..., None], 0)
+
+        normalized = self.layers[0].norm1(x)
+        for layer_index, layer in enumerate(self.layers):
+            attention_output = layer.attention(
+                normalized, None, self.config.causal
+            )
+            x, normalized_ffn = fused_add_layer_norm(
+                x, attention_output, layer.norm2
+            )
+            ffn_output = layer.ffn_out(
+                F.gelu(layer.ffn_in(normalized_ffn), approximate="none")
+            )
+
+            if layer_index + 1 < len(self.layers):
+                next_norm = self.layers[layer_index + 1].norm1
+            else:
+                next_norm = self.final_norm
+            x, normalized = fused_add_layer_norm(x, ffn_output, next_norm)
+
+        return normalized
         # ============================================================
 
 
@@ -205,7 +392,34 @@ def copy_model_weights(
 ) -> None:
     """Copy identical weights into both implementations for a fair comparison."""
     state_dict = copy.deepcopy(baseline.state_dict())
-    incompatible = optimized.load_state_dict(state_dict, strict=strict)
+    if isinstance(optimized, UserOptimizedTransformer):
+        mapped_state_dict = {}
+        for key in optimized.state_dict():
+            if key.endswith("attention.qkv_proj.weight"):
+                prefix = key[: -len("qkv_proj.weight")]
+                mapped_state_dict[key] = torch.cat(
+                    [
+                        state_dict[prefix + "q_proj.weight"],
+                        state_dict[prefix + "k_proj.weight"],
+                        state_dict[prefix + "v_proj.weight"],
+                    ],
+                    dim=0,
+                )
+            elif key.endswith("attention.qkv_proj.bias"):
+                prefix = key[: -len("qkv_proj.bias")]
+                mapped_state_dict[key] = torch.cat(
+                    [
+                        state_dict[prefix + "q_proj.bias"],
+                        state_dict[prefix + "k_proj.bias"],
+                        state_dict[prefix + "v_proj.bias"],
+                    ],
+                    dim=0,
+                )
+            else:
+                mapped_state_dict[key] = state_dict[key]
+        incompatible = optimized.load_state_dict(mapped_state_dict, strict=strict)
+    else:
+        incompatible = optimized.load_state_dict(state_dict, strict=strict)
     if not strict:
         if incompatible.missing_keys:
             print(f"[warning] missing optimized keys: {incompatible.missing_keys}")
@@ -591,6 +805,34 @@ def maybe_compile(model: nn.Module, enabled: bool, mode: str) -> nn.Module:
     return torch.compile(model, mode=mode)
 
 
+class MicrobatchModel(nn.Module):
+    """Run independent batch slices to cap inference activation memory."""
+
+    def __init__(self, model: nn.Module, microbatch_size: int) -> None:
+        super().__init__()
+        self.model = model
+        self.microbatch_size = microbatch_size
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        valid_token_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        if x.shape[0] <= self.microbatch_size:
+            return self.model(x, valid_token_mask)
+
+        outputs = []
+        for start in range(0, x.shape[0], self.microbatch_size):
+            end = min(start + self.microbatch_size, x.shape[0])
+            mask_slice = (
+                None
+                if valid_token_mask is None
+                else valid_token_mask[start:end]
+            )
+            outputs.append(self.model(x[start:end], mask_slice))
+        return torch.cat(outputs, dim=0)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Compare a baseline and optimized PyTorch Transformer"
@@ -613,6 +855,15 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--padding-ratio", type=float, default=0.0)
     parser.add_argument("--input-scale", type=float, default=1.0)
+    parser.add_argument(
+        "--microbatch-size",
+        type=int,
+        default=None,
+        help=(
+            "maximum inference batch slice; defaults to 250 for CUDA batches "
+            ">= 4096, 0 disables automatic microbatching"
+        ),
+    )
 
     parser.add_argument("--accuracy-trials", type=int, default=5)
     parser.add_argument("--rtol", type=float, default=0.02)
@@ -625,11 +876,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--benchmark-on-failure", action="store_true")
 
     parser.add_argument("--compile-baseline", action="store_true")
-    parser.add_argument("--compile-user", action="store_true")
+    parser.add_argument(
+        "--compile-user",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "compile the optimized model; defaults to enabled on CUDA and "
+            "disabled on CPU"
+        ),
+    )
     parser.add_argument(
         "--compile-mode",
         choices=("default", "reduce-overhead", "max-autotune"),
-        default="default",
+        default="reduce-overhead",
     )
     parser.add_argument("--non-strict-weight-copy", action="store_true")
     parser.add_argument(
@@ -651,6 +910,8 @@ def validate_args(args: argparse.Namespace, device: torch.device, dtype: torch.d
         raise ValueError("padding_ratio must be in [0, 1)")
     if args.input_scale <= 0:
         raise ValueError("input_scale must be positive")
+    if args.microbatch_size is not None and args.microbatch_size < 0:
+        raise ValueError("microbatch_size must be non-negative")
     if args.accuracy_trials <= 0:
         raise ValueError("accuracy_trials must be positive")
     if args.rtol < 0 or args.atol < 0:
@@ -689,6 +950,7 @@ def main() -> int:
 
     baseline = BaselineTransformer(config)
     optimized = UserOptimizedTransformer(config)
+    optimized.assume_all_tokens_valid = args.padding_ratio <= 0
     copy_model_weights(
         baseline,
         optimized,
@@ -698,13 +960,38 @@ def main() -> int:
     baseline = baseline.to(device=device, dtype=dtype).eval()
     optimized = optimized.to(device=device, dtype=dtype).eval()
 
+    microbatch_size = args.microbatch_size
+    if microbatch_size is None:
+        microbatch_size = (
+            250
+            if device.type == "cuda" and config.batch_size >= 4096
+            else 0
+        )
+
     # Compile only after model construction, weight copy, device transfer, and eval().
+    compile_user = args.compile_user
+    if compile_user is None:
+        compile_user = device.type == "cuda"
+    if compile_user and microbatch_size > 0:
+        print(
+            "[warning] disabling optimized-model compilation for microbatched "
+            "execution; eager slicing is faster and uses less static memory"
+        )
+        compile_user = False
     baseline = maybe_compile(baseline, args.compile_baseline, args.compile_mode)
-    optimized = maybe_compile(optimized, args.compile_user, args.compile_mode)
+    optimized = maybe_compile(optimized, compile_user, args.compile_mode)
+    if microbatch_size > 0:
+        baseline = MicrobatchModel(baseline, microbatch_size)
+        optimized = MicrobatchModel(optimized, microbatch_size)
 
     print("=== Configuration ===")
     print(config)
     print(f"device={device}, dtype={dtype}, torch={torch.__version__}")
+    print(
+        f"compile_baseline={args.compile_baseline}, "
+        f"compile_user={compile_user}, compile_mode={args.compile_mode}"
+    )
+    print(f"microbatch_size={microbatch_size or 'disabled'}")
     if device.type == "cuda":
         print(f"gpu={torch.cuda.get_device_name(device)}")
 

@@ -1,0 +1,20 @@
+[warning] disabling custom-model compilation for microbatched execution
+=== Custom-kernel configuration ===
+TransformerConfig(batch_size=10000, seq_len=128, d_model=128, num_heads=4, ffn_dim=128, num_layers=4, causal=True)
+device=cuda, dtype=torch.float32, torch=2.13.0+cu130
+compile_baseline=False, compile_custom=False, compile_mode=reduce-overhead
+microbatch_size=250
+custom_attention_active=True
+gpu=NVIDIA GeForce RTX 5060 Laptop GPU
+
+=== Accuracy check ===
+criterion: abs_error <= 0.002 OR relative_error <= 2.00%
+trial 01/1: PASS | max_abs=0.0019486 | max_rel=53867.4 | failed=0/163840000
+summary: PASS | max_abs=0.0019486 | max_rel=53867.4 | failed=0/163840000
+
+=== Performance benchmark ===
+timing excludes random-data generation and uses a fixed input
+CUDA latency is measured with torch.cuda.Event on the current stream
+baseline : median=744.2282 ms | mean=743.7093 ms | p90=745.4689 ms | min=740.8611 ms | throughput=1719902.55 token/s
+optimized: median=198.7912 ms | mean=199.3192 ms | p90=201.7282 ms | min=197.5060 ms | throughput=6438917.84 token/s
+speedup  : 3.744x based on median latency
